@@ -1,0 +1,47 @@
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Локальные файлы
+.env
+*.env
+local_settings.py
+db.sqlite3
+meetings.db
+*.db
+
+# Логи
+logs
+*.log
+*.tmp
+temp/
+
+# Docker (если пока не используешь — можно убрать)
+.dockerignore
+docker-compose.yml
+
+

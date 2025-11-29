@@ -1,0 +1,567 @@
+"""
+searchmeetings.py — модуль поиска встреч: по категориям, локации, ИИ
+"""
+from telegram import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    Update,
+    InputMediaPhoto,
+)
+from telegram.constants import ParseMode
+from telegram.ext import (
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+from datetime import datetime
+from typing import Optional, List
+import math
+import logging
+import aiohttp
+import json
+from db import get_db, Meeting, MeetingParticipant
+from sqlalchemy import select
+from config import YANDEX_API_KEY
+from constant import MEETING_CATEGORIES, JOIN_PREFIX, LEAVE_PREFIX
+from logic import extract_coordinates_from_yandex, get_main_keyboard, is_user_registered
+from common import send_main_menu
+
+logger = logging.getLogger(__name__)
+
+
+async def handle_find_meetings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Показать выбор категорий перед поиском.
+    """
+    user_id = update.effective_user.id
+    if not await is_user_registered(user_id):
+        await update.message.reply_text("⚠️ Пройдите регистрацию, чтобы искать встречи.")
+        await send_main_menu(update, context)
+        return
+
+    # Состояние
+    context.user_data["awaiting_category_selection"] = True
+    if "selected_categories" not in context.user_data:
+        context.user_data["selected_categories"] = set()
+
+    # Кнопки категорий
+    buttons = [
+        [InlineKeyboardButton(f"⬜ {cat}", callback_data=f"cat_{cat}")]
+        for cat in MEETING_CATEGORIES
+    ]
+
+    # Кнопки управления
+    buttons.append([
+        InlineKeyboardButton("✅ Готово", callback_data="cat_done"),
+        InlineKeyboardButton("⏭️ Пропустить", callback_data="cat_skip"),
+    ])
+
+    markup = InlineKeyboardMarkup(buttons)
+
+    msg_text = (
+        "🔍 <b>Выберите интересующие вас категории:</b>\n\n"
+        "🔹 Нажмите на категорию, чтобы отметить/снять\n"
+        "🔹 Нажмите «Готово», чтобы продолжить\n"
+        "🔹 Можно выбрать несколько — или пропустить"
+    )
+
+    await update.message.reply_text(
+        msg_text,
+        reply_markup=markup,
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def handle_category_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработка выбора категорий.
+    """
+    query = update.callback_query
+    data = query.data
+
+    if not context.user_data.get("awaiting_category_selection"):
+        await query.answer()
+        return
+
+    selected = context.user_data["selected_categories"]
+    category = data[4:] if data.startswith("cat_") else None
+
+    # --- Обработка: Готово ---
+    if data == "cat_done":
+        await query.answer(f"Выбрано: {len(selected)} категорий")
+        context.user_data["awaiting_category_selection"] = False
+
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📍 Поблизости", callback_data="near_me")],
+            [InlineKeyboardButton("🤖 Поиск через ИИ", callback_data="ai_search")],
+        ])
+
+        text = f"✅ Выбрано: {len(selected)} категорий\n\nВыберите способ поиска:"
+        await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
+        return
+
+    # --- Обработка: Пропустить ---
+    if data == "cat_skip":
+        await query.answer("Пропущено")
+        context.user_data["selected_categories"] = []  # ✅ Пустой список, не None
+        context.user_data["skip_categories"] = True   # ✅ Флаг: категории пропущены
+        context.user_data["awaiting_category_selection"] = False
+
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📍 Поблизости", callback_data="near_me")],
+            [InlineKeyboardButton("🤖 Поиск через ИИ", callback_data="ai_search")],
+        ])
+
+        await query.edit_message_text(
+            text="Выберите способ поиска:",
+            reply_markup=markup,
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # --- Обработка: Переключение категории ---
+    if category and category in MEETING_CATEGORIES:
+        if category in selected:
+            selected.discard(category)
+            emoji = "⬜"
+        else:
+            selected.add(category)
+            emoji = "✅"
+
+        # Обновляем кнопки
+        buttons = [
+            [InlineKeyboardButton(f"{'✅' if cat in selected else '⬜'} {cat}", callback_data=f"cat_{cat}")]
+            for cat in MEETING_CATEGORIES
+        ]
+        buttons.append([
+            InlineKeyboardButton("✅ Готово", callback_data="cat_done"),
+            InlineKeyboardButton("⏭️ Пропустить", callback_data="cat_skip"),
+        ])
+        markup = InlineKeyboardMarkup(buttons)
+
+        await query.answer()
+        await query.edit_message_reply_markup(reply_markup=markup)
+
+async def request_ai_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Запрос описания встречи у пользователя для поиска через ИИ.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    # Убираем кнопки
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    # Инструкция
+    msg_text = (
+        "🤖 <b>Опишите, какую встречу вы ищете</b>\n\n"
+        "Примеры:\n"
+        "• Пробежка и общение\n"
+        "• Встреча для фрилансеров\n"
+        "• Кофе и знакомства в центре\n"
+        "• Групповое чтение книг"
+    )
+
+    await query.message.reply_text(msg_text, parse_mode=ParseMode.HTML)
+
+    # Устанавливаем состояние
+    context.user_data["awaiting_ai_query"] = True
+
+
+async def handle_ai_query_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработка ввода пользователя для ИИ-поиска.
+    """
+    if not context.user_data.get("awaiting_ai_query"):
+        return
+
+    query_text = update.message.text.strip()
+    user_id = update.effective_user.id
+
+    if not query_text:
+        await update.message.reply_text("📝 Пожалуйста, опишите интересующую встречу.")
+        return
+
+    context.user_data["awaiting_ai_query"] = False
+    await update.message.reply_text("🔍 Ищу подходящие встречи с помощью ИИ...")
+
+    # ✅ Безопасное определение категорий
+    if context.user_data.get("skip_categories"):
+        categories = None  # Искать по всем
+    else:
+        selected = context.user_data.get("selected_categories", [])
+        categories = list(selected) if selected else None
+
+    try:
+        from ai_search import search_meetings_by_ai
+        meeting_ids = await search_meetings_by_ai(query_text, categories=categories)
+
+        if not meeting_ids:
+            await update.message.reply_text("😔 Не нашлось подходящих встреч по вашему запросу.")
+            return
+
+        async with get_db() as db:
+            result = await db.execute(select(Meeting).where(Meeting.id.in_(meeting_ids)))
+            meetings = result.scalars().all()
+
+        if not meetings:
+            await update.message.reply_text("😔 Встречи не найдены.")
+            return
+
+        # Участия пользователя
+        result = await db.execute(
+            select(MeetingParticipant.meeting_id).where(MeetingParticipant.user_id == user_id)
+        )
+        user_participations = set(result.scalars().all())
+
+        # Отображение каждой встречи
+        for meeting in meetings:
+            free = meeting.max_participants - meeting.current_participants
+            status_text = (
+                f"🟢 Свободно {free} {['место', 'места', 'мест'][min(free, 3) - 1]} из {meeting.max_participants}"
+                if free > 0 else "🔴 Нет свободных мест"
+            )
+
+            text = (
+                f"📌 <b>{meeting.title}</b>\n"
+                f"📅 {meeting.date_time.strftime('%d.%m %H:%M')}\n"
+                f"📍 {meeting.address}\n"
+                f"{status_text}"
+            )
+            if meeting.description:
+                text += f"\n\n{meeting.description}"
+
+            is_creator = meeting.creator_id == user_id
+            is_joined = meeting.id in user_participations
+
+            if is_creator:
+                buttons = [
+                    [InlineKeyboardButton("✅ Это ваша встреча", callback_data="own_meeting")],
+                    [InlineKeyboardButton("🔍 Подробнее", callback_data=f"details_{meeting.id}")]
+                ]
+            else:
+                buttons = [
+                    [
+                        InlineKeyboardButton(
+                            "✅ Покинуть" if is_joined else "✅ Присоединиться",
+                            callback_data=f"{LEAVE_PREFIX if is_joined else JOIN_PREFIX}{meeting.id}"
+                        ),
+                        InlineKeyboardButton("🔍 Подробнее", callback_data=f"details_{meeting.id}")
+                    ]
+                ]
+
+            markup = InlineKeyboardMarkup(buttons)
+
+            # Отправка фото (если есть)
+            if meeting.photos_data:
+                try:
+                    photos = json.loads(meeting.photos_data)
+                    if photos:
+                        media_group = [InputMediaPhoto(media=p['file_id']) for p in photos]
+                        await context.bot.send_media_group(
+                            chat_id=update.effective_chat.id,
+                            media=media_group
+                        )
+                        await update.effective_message.reply_text(
+                            text=text,
+                            reply_markup=markup,
+                            parse_mode=ParseMode.HTML
+                        )
+                        continue
+                except Exception as e:
+                    logger.warning(f"[PHOTO] Ошибка при отправке фото встречи {meeting.id}: {e}")
+
+            await update.effective_message.reply_text(
+                text=text,
+                reply_markup=markup,
+                parse_mode=ParseMode.HTML
+            )
+
+        await update.message.reply_text("Вот что нашёл ИИ 🤖")
+
+    except Exception as e:
+        logger.exception("[AI_SEARCH] Ошибка при поиске: %s", e)
+        await update.message.reply_text("❌ Произошла ошибка при поиске. Попробуйте позже.")
+
+
+async def request_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Инструкция по отправке геопозиции.
+    """
+    query = update.callback_query
+    if query:
+        await query.answer()
+        await query.edit_message_text(
+            "📍 Отправьте ваше местоположение, чтобы найти встречи поблизости."
+        )
+
+    msg_text = (
+        "📍 <b>Как отправить геопозицию:</b>\n\n"
+        "1. Нажмите на 📎 (скрепку)\n"
+        "2. Выберите «Геопозиция»\n"
+        "3. Отправьте ваше местоположение\n\n"
+        "⚠️ Важно: отправьте именно <i>локацию</i>, а не адрес."
+    )
+
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=msg_text,
+        parse_mode=ParseMode.HTML,
+        disable_notification=True
+    )
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработка полученной геопозиции.
+    """
+    # Защита от текстовых сообщений
+    if not update.message.location:
+        return
+
+    lat = update.message.location.latitude
+    lon = update.message.location.longitude
+
+    # Подтверждение
+    await update.message.reply_text("🔍 Определяем ваш город...")
+
+    # Определение города
+    city = await get_city_from_coords(lat, lon)
+    if not city or city == "Неизвестный город":
+        await update.message.reply_text("❌ Не удалось определить город. Попробуйте ещё раз.")
+        await send_main_menu(update, context)
+        return
+
+    # Сохранение в контекст
+    context.user_data.update({
+        "step": "near_me",
+        "city": city,
+        "lat": lat,
+        "lon": lon,
+        "page": 0
+    })
+
+    # Показ встреч
+    await show_near_me_meetings(update, context, lat, lon, page=0)
+
+    # Отправка главного меню (невидимо)
+    await send_main_menu(update.effective_chat.id, context, silent=True)
+
+async def get_city_from_coords(lat: float, lon: float) -> str:
+    """
+    Определяет город по координатам через Yandex Geocoder.
+    """
+    url = f"https://geocode-maps.yandex.ru/1.x/?apikey={YANDEX_API_KEY}&format=json&geocode={lon},{lat}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=8) as response:
+                if response.status != 200:
+                    return "Неизвестный город"
+                data = await response.json()
+
+        feature = data["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]
+        address = feature["metaDataProperty"]["GeocoderMetaData"]["text"]
+        parts = [p.strip() for p in address.split(",")]
+
+        # Ищем часть, похожую на город
+        for p in parts:
+            p_lower = p.lower()
+            if any(kw in p_lower for kw in ["район", "область", "улица", "проспект", "шоссе", "переулок", "дом", "стр", "кв"]):
+                continue
+            if len(p) > 2 and p[0].isupper() and not p.isdigit():
+                return p
+
+        # Обратный поиск
+        for p in reversed(parts):
+            if len(p) > 2 and p[0].isupper() and not any(kw in p_lower for kw in ["обл", "ул", "пр", "ш", "д"]):
+                return p
+
+        return parts[1] if len(parts) > 1 else parts[0]
+
+    except (IndexError, KeyError, aiohttp.ClientError) as e:
+        logger.warning(f"[GEO] Не удалось определить город: {e}")
+        return "Неизвестный город"
+
+
+def calculate_distance(lat1: float, lon1: float, lat2, lon2) -> float:
+    """
+    Вычисляет расстояние между двумя точками (в км)
+    lat1, lon1 — пользователь (float)
+    lat2, lon2 — встреча (может быть Decimal)
+    """
+    # Явно конвертируем Decimal → float
+    lat2 = float(lat2)
+    lon2 = float(lon2)
+
+    from math import radians, sin, cos, sqrt, atan2
+
+    R = 6371.0  # Радиус Земли в км
+
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    distance = R * c
+    return distance
+
+
+async def get_meetings_by_geo(
+    lat: float, lon: float, page: int = 0, per_page: int = 5, categories: Optional[List[str]] = None
+) -> List[Meeting]:
+    """
+    Получение встреч поблизости с фильтрацией по категориям и сортировкой по расстоянию.
+    """
+    async with get_db() as db:
+        stmt = select(Meeting).where(Meeting.date_time > datetime.now())
+        if categories:
+            stmt = stmt.where(Meeting.category.in_(categories))
+        result = await db.execute(stmt)
+        meetings = result.scalars().all()
+
+    for m in meetings:
+        m.distance = calculate_distance(lat, lon, m.latitude, m.longitude)
+
+    sorted_meetings = sorted(meetings, key=lambda x: x.distance)
+    start_idx = page * per_page
+    return sorted_meetings[start_idx:start_idx + per_page]
+
+async def show_near_me_meetings(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, lat: float, lon: float, page: int = 0
+):
+    """
+    Отображение встреч поблизости — с фото, текстом и кнопками.
+    Расстояние < 1 км показывается в метрах, остальное — в км.
+    """
+    # ✅ Безопасное определение категорий
+    if context.user_data.get("skip_categories"):
+        categories = None
+    else:
+        selected = context.user_data.get("selected_categories", [])
+        categories = list(selected) if selected else None
+
+    user_id = update.effective_user.id
+
+    meetings = await get_meetings_by_geo(lat, lon, page, per_page=5, categories=categories)
+
+    if not meetings:
+        await update.effective_message.reply_text("😔 Встреч поблизости не найдено.")
+        return
+
+    # Участия пользователя
+    user_participations = set()
+    if await is_user_registered(user_id):
+        async with get_db() as db:
+            result = await db.execute(
+                select(MeetingParticipant.meeting_id).where(MeetingParticipant.user_id == user_id)
+            )
+            user_participations = set(result.scalars().all())
+
+    # Отображение каждой встречи
+    for meeting in meetings:
+        free = meeting.max_participants - meeting.current_participants
+        status_text = (
+            f"🟢 Свободно {free} {['место', 'места', 'мест'][min(free, 3) - 1]} из {meeting.max_participants}"
+            if free > 0 else "🔴 Нет свободных мест"
+        )
+
+        if meeting.distance < 1.0:
+            meters = int(meeting.distance * 1000)
+            distance_text = f"{meters} м"
+        else:
+            distance_text = f"{meeting.distance:.1f} км"
+
+        text = (
+            f"📌 <b>{meeting.title}</b>\n"
+            f"📅 {meeting.date_time.strftime('%d.%m %H:%M')}\n"
+            f"📍 {meeting.address} (<i>{distance_text}</i>)\n"
+            f"{status_text}"
+        )
+        if meeting.description:
+            text += f"\n\n{meeting.description}"
+
+        is_creator = meeting.creator_id == user_id
+        is_joined = meeting.id in user_participations
+
+        if is_creator:
+            buttons = [
+                [InlineKeyboardButton("✅ Это ваша встреча", callback_data="own_meeting")],
+                [InlineKeyboardButton("🔍 Подробнее", callback_data=f"details_{meeting.id}")]
+            ]
+        else:
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        "✅ Покинуть" if is_joined else "✅ Присоединиться",
+                        callback_data=f"{LEAVE_PREFIX if is_joined else JOIN_PREFIX}{meeting.id}"
+                    ),
+                    InlineKeyboardButton("🔍 Подробнее", callback_data=f"details_{meeting.id}")
+                ]
+            ]
+
+        markup = InlineKeyboardMarkup(buttons)
+
+        if meeting.photos_data:
+            try:
+                photos = json.loads(meeting.photos_data)
+                if photos:
+                    media_group = [InputMediaPhoto(media=p['file_id']) for p in photos]
+                    await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media_group)
+                    await update.effective_message.reply_text(
+                        text=text, reply_markup=markup, parse_mode=ParseMode.HTML
+                    )
+                    continue
+            except Exception as e:
+                logger.warning(f"[PHOTO] Ошибка фото встречи {meeting.id}: {e}")
+
+        await update.effective_message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+
+    # Кнопка "Показать ещё"
+    if len(meetings) == 5:
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➡️ Показать ещё", callback_data=f"show_more_near_{page + 1}")]
+        ])
+        await update.effective_message.reply_text("Хотите увидеть больше?", reply_markup=markup)
+
+
+
+
+async def handle_show_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработка кнопки 'Показать ещё'.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if data.startswith("show_more_near_"):
+        page = int(data.split("_")[-1])
+        lat = context.user_data.get("lat")
+        lon = context.user_data.get("lon")
+        if lat and lon:
+            await show_near_me_meetings(update, context, lat, lon, page=page)
+        else:
+            await query.message.reply_text("❌ Ошибка: координаты утеряны.")
+
+async def handle_near_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработка кнопки 'Поблизости'.
+    """
+    query = update.callback_query
+    await query.answer()
+    await request_location(update, context)
+
+
+def get_handlers():
+    """
+    Возвращает словарь хендлеров для регистрации в main.py.
+    """
+    return {
+        "handle_find_meetings": handle_find_meetings,
+        "handle_category_selection": handle_category_selection,
+        "request_ai_search": request_ai_search,
+        "handle_ai_query_input": handle_ai_query_input,
+        "request_location": request_location,
+        "handle_location": handle_location,
+        "handle_near_me": handle_near_me,
+        "handle_show_more": handle_show_more,
+    }
