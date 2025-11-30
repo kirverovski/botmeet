@@ -1,1 +1,0 @@
-GRANT ALL PRIVILEGES ON DATABASE meetings_db TO botuser;
