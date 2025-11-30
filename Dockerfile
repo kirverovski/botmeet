@@ -1,24 +1,21 @@
-# Dockerfile
 FROM python:3.11-slim
 
-# Установка локали (чтобы не было ошибок с кодировкой)
-ENV LANG C.UTF-8
-ENV LC_ALL C.UTF-8
+# Установка локали
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
-# Рабочая папка в контейнере
+# Рабочая директория
 WORKDIR /app
 
-# Копируем файл зависимостей
+# Копируем и устанавливаем зависимости
 COPY requirements.txt .
-
-# Устанавливаем зависимости
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем ВЕСЬ код
-COPY . .
+# Устанавливаем uvloop (ускорение асинхронности)
+RUN pip install --no-cache-dir uvloop
 
-# Установка uvloop (ускорение)
-RUN pip install uvloop --no-cache-dir
+# Копируем код
+COPY . .
 
 # Запуск бота
 CMD ["python", "main.py"]
