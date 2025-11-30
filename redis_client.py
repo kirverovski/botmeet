@@ -1,6 +1,7 @@
 """
-redis.py — Асинхронное подключение к Redis с использованием официальной библиотеки `redis`
+redis_client.py — Асинхронное подключение к Redis с использованием переменной окружения
 """
+import os
 import redis.asyncio as redis
 from typing import Optional
 
@@ -11,12 +12,14 @@ redis_client: Optional[redis.Redis] = None
 async def init_redis():
     """
     Инициализация подключения к Redis.
-    Вызывается при старте бота.
+    Берёт URL из переменной окружения REDIS_URL.
     """
     global redis_client
     try:
+        # Читаем URL из переменной окружения
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
         redis_client = redis.from_url(
-            "redis://localhost:6379",  # Убедись, что Redis запущен
+            redis_url,
             encoding="utf8",
             decode_responses=True,  # Чтобы возвращались строки, а не байты
         )
@@ -36,5 +39,5 @@ async def close_redis():
     """
     global redis_client
     if redis_client:
-        await redis_client.aclose()  # Используем aclose() для корректного завершения
+        await redis_client.aclose()
         print("✅ Redis: соединение закрыто")

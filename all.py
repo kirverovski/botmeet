@@ -25,8 +25,7 @@ from common import (
 from config import YANDEX_API_KEY
 from participants import handle_join
 from logic import (
-    is_user_registered, get_main_keyboard,
-    create_week_calendar_markup
+        is_user_registered, get_main_keyboard,
 )
 from db import Meeting, User, MeetingParticipant, get_db
 from datetime import datetime
@@ -43,7 +42,6 @@ async def send_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"[WELCOME] Пользователь {user_id} запустил бота")
     await send_main_menu(chat_id=update.effective_chat.id, context=context)
-
 
 # --- 2. Обработчик нажатий на кнопки главного меню ---
 async def handle_main_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -327,7 +325,7 @@ async def handle_meeting_details(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer("❌ Встреча не найдена.")
             return
 
-        # Проверка: участник ли пользователь?
+        # Проверка участия
         result = await db.execute(
             select(MeetingParticipant).where(
                 MeetingParticipant.meeting_id == meeting_id,
@@ -335,32 +333,33 @@ async def handle_meeting_details(update: Update, context: ContextTypes.DEFAULT_T
             )
         )
         is_participant = result.scalar() is not None
-
-        # Создатель всегда видит чат
         is_creator = meeting.creator_id == user_id
 
-        # Формируем текст
-        creator = await db.get(User, meeting.creator_id)
-        username = creator.username if creator and creator.username else "скрыт"
+        # 🔍 Получаем создателя по telegram_id (не по User.id!)
+        result = await db.execute(
+            select(User).where(User.telegram_id == meeting.creator_id)
+        )
+        creator = result.scalar_one_or_none()
+        creator_username = creator.username if creator and creator.username else "Аноним"
+        creator_display = f"@{creator_username}" if creator and creator.username else "Аноним"
 
+        # Формируем текст
         text = (
             f"📌 <b>{meeting.title}</b>\n"
+            f"💬 {meeting.description or 'Без описания'}"
             f"📅 <b>{meeting.date_time.strftime('%d.%m %H:%M')}</b>\n"
             f"📍 <b>{meeting.address}</b>\n"
             f"👥 {meeting.current_participants}/{meeting.max_participants}\n"
             f"🏷️ {meeting.category}\n"
             f"🔏 {meeting.privacy}\n"
-            f"💬 {meeting.description or 'Без описания'}\n"
-            f"👤 Создатель: @{username}"
+            f"👤 Создатель: {creator_display}\n"
         )
 
-        # 🔐 Условия для отображения чата
+        # 🔐 Показываем чат только участникам и создателю
         if meeting.chat_link:
             if is_participant or is_creator:
-                # Показываем ссылку
                 text += f"\n\n💬 <a href='{meeting.chat_link}'>Чат встречи</a>"
             else:
-                # Неприсоединившемуся — только подсказка
                 text += "\n\nℹ️ Эта встреча имеет общий чат. Он станет доступен после присоединения."
 
         markup = InlineKeyboardMarkup([[
@@ -377,6 +376,7 @@ async def handle_meeting_details(update: Update, context: ContextTypes.DEFAULT_T
         except Exception as e:
             logger.error(f"Ошибка при редактировании сообщения: {e}")
             await query.answer("Ошибка отображения.")
+
 
 
 async def back_to_meeting(update: Update, context: ContextTypes.DEFAULT_TYPE):

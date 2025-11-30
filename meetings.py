@@ -15,6 +15,7 @@ from telegram.ext import (
     filters,
 )
 from datetime import datetime, timedelta
+from calendar_keyboard import create_calendar, handle_calendar_query
 import re
 import json
 import logging
@@ -25,7 +26,6 @@ from logic import (
     extract_coordinates_from_yandex,
     is_user_registered,
     get_coords_from_yandex,
-    create_week_calendar_markup,
 )
 from constant import MEETING_CATEGORIES
 from config import YANDEX_API_KEY
@@ -549,78 +549,49 @@ async def handle_map_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Переход к выбору даты
     now = datetime.now()
-    markup = create_week_calendar_markup(now.year, now.month)
+    context.user_data['calendar_year'] = now.year
+    context.user_data['calendar_month'] = now.month
+    markup = create_calendar(now.year, now.month)
     msg = await update.effective_message.reply_text(
         f"{get_progress_text(6)}✅ Место: <b>{full_address}</b>\n\n"
-        "📅 Выберите дату встречи:",
+        "📅 Выберите дата встречи:",
         reply_markup=markup,
         parse_mode=ParseMode.HTML,
     )
     context.user_data['message_id'] = msg.message_id
     return MEETING_DATE
-
-# --- Дата ---
+# --- Дата (Новый календарь) ---
+# --- Дата (Новый календарь) ---
 async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Шаг 6: Выбор даты.
+    Шаг 6: Выбор даты → после выбора — отправляем выбор времени.
     """
     query = update.callback_query
-    await query.answer()
+    if query and query.data.startswith("cal_"):
+        # ← handle_calendar_query обработает, но не будет отправлять
+        await handle_calendar_query(update, context)
 
-    data = query.data
-
-    if data.startswith("prev_week_") or data.startswith("next_week_"):
-        direction = -7 if data.startswith("prev_week_") else 7
-        now = datetime.now()
-        year = context.user_data.get('calendar_year', now.year)
-        month = context.user_data.get('calendar_month', now.month)
-        new_date = datetime(year, month, 1) + timedelta(days=direction)
-        context.user_data['calendar_year'] = new_date.year
-        context.user_data['calendar_month'] = new_date.month
-
-        markup = create_week_calendar_markup(new_date.year, new_date.month)
-        await query.message.edit_reply_markup(reply_markup=markup)
-        return MEETING_DATE
-
-    if data.startswith("day_"):
-        try:
-            _, year_str, month_str, day_str = data.split("_", 3)
-            selected_date = datetime(int(year_str), int(month_str), int(day_str))
-
-            if selected_date.date() < datetime.now().date():
-                await query.answer("❌ Прошлая дата недоступна", show_alert=True)
-                return MEETING_DATE
-
-            context.user_data['date_time'] = selected_date
-
+        # Если дата выбрана — отправляем время
+        if 'date_time' in context.user_data:
+            selected_date = context.user_data['date_time']
             try:
                 await context.bot.delete_message(
-                    chat_id=query.message.chat.id,
+                    chat_id=update.effective_chat.id,
                     message_id=context.user_data['message_id']
                 )
             except Exception as e:
-                logger.debug(f"[MEETING] Не удалось удалить сообщение: {e}")
+                logger.debug(f"[MEETING] Не удалено: {e}")
 
+            # Отправляем кнопки времени
             time_markup = get_time_buttons_for_date(selected_date)
-            msg = await context.bot.send_message(
-                chat_id=query.message.chat.id,
-                text=f"{get_progress_text(7)}⏰ Выберите время встречи:",
+            msg = await update.effective_message.reply_text(
+                f"{get_progress_text(7)}⏰ Выберите время встречи:",
                 reply_markup=time_markup,
                 parse_mode=ParseMode.HTML,
             )
             context.user_data['message_id'] = msg.message_id
             return MEETING_TIME
 
-        except (ValueError, IndexError) as e:
-            logger.error(f"[MEETING] Ошибка парсинга даты: {e}")
-            await query.answer("❌ Ошибка выбора даты.")
-            return MEETING_DATE
-
-    # Обновляем, если не поняли
-    year = context.user_data.get('calendar_year', datetime.now().year)
-    month = context.user_data.get('calendar_month', datetime.now().month)
-    markup = create_week_calendar_markup(year, month)
-    await query.message.edit_reply_markup(reply_markup=markup)
     return MEETING_DATE
 
 
@@ -1157,7 +1128,8 @@ meeting_conv = ConversationHandler(
         MEETING_CATEGORY: [CallbackQueryHandler(handle_category_choice, pattern=r"^category_")],
         MEETING_PRIVACY: [CallbackQueryHandler(handle_privacy_choice, pattern=r"^privacy_")],
         MEETING_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_map_url)],
-        MEETING_DATE: [CallbackQueryHandler(handle_date_selection, pattern=r"^(day_|prev_week_|next_week_)")],
+        MEETING_DATE: [CallbackQueryHandler(handle_date_selection, pattern=r"^cal_")],
+
         MEETING_TIME: [
             CallbackQueryHandler(handle_time_selection, pattern=r"^(manual_time|time_\d{2}:\d{2})$"),
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_time_selection),

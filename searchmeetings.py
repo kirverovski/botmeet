@@ -20,7 +20,7 @@ import math
 import logging
 import aiohttp
 import json
-from db import get_db, Meeting, MeetingParticipant
+from db import get_db, Meeting, MeetingParticipant, User
 from sqlalchemy import select
 from config import YANDEX_API_KEY
 from constant import MEETING_CATEGORIES, JOIN_PREFIX, LEAVE_PREFIX
@@ -216,6 +216,7 @@ async def handle_ai_query_input(update: Update, context: ContextTypes.DEFAULT_TY
         user_participations = set(result.scalars().all())
 
         # Отображение каждой встречи
+        
         for meeting in meetings:
             free = meeting.max_participants - meeting.current_participants
             status_text = (
@@ -457,6 +458,7 @@ async def show_near_me_meetings(
             user_participations = set(result.scalars().all())
 
     # Отображение каждой встречи
+    
     for meeting in meetings:
         free = meeting.max_participants - meeting.current_participants
         status_text = (

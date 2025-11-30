@@ -9,6 +9,7 @@ venv/
 .venv/
 pip-log.txt
 pip-delete-this-directory.txt
+.tox
 .pytest_cache
 .coverage
 .coverage.*
@@ -18,6 +19,7 @@ coverage.xml
 *.cover
 *.log
 .ipynb_checkpoints
+.hypothesis/
 
 # IDE
 .vscode/
@@ -43,5 +45,7 @@ temp/
 # Docker (если пока не используешь — можно убрать)
 .dockerignore
 docker-compose.yml
+Thumbs.db
+Desktop.ini
 
 
