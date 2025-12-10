@@ -150,6 +150,7 @@ async def handle_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def handle_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Обрабатывает выход пользователя из встречи.
+    Отправляет уведомление создателю встречи.
     """
     query = update.callback_query
     user_id = query.from_user.id
@@ -195,6 +196,31 @@ async def handle_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await db.commit()
             await db.refresh(meeting)
 
+        # ✅ Уведомление создателю о выходе участника
+        try:
+            async with get_db() as db_notify:
+                result = await db_notify.execute(
+                    select(User.full_name, User.username).where(User.telegram_id == user_id)
+                )
+                user_data = result.first()
+                if not user_data:
+                    raise ValueError("Не удалось получить данные пользователя")
+
+                user_name = user_data.full_name
+                username = f"@{user_data.username}" if user_data.username else "Пользователь"
+
+            await context.bot.send_message(
+                chat_id=meeting.creator_id,
+                text=f"👤 <b>{user_name}</b> ({username}) покинул(-а) вашу встречу:\n\n"
+                     f"📌 <b>{meeting.title}</b>\n"
+                     f"📅 {meeting.date_time.strftime('%d.%m %H:%M')}\n"
+                     f"📍 {meeting.address}\n\n"
+                     f"👥 Осталось: {meeting.current_participants}/{meeting.max_participants}",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось отправить уведомление о выходе создателю {meeting.creator_id}: {e}")
+
         # Обновление сообщения
         location_text = meeting.address or f"{meeting.latitude:.6f}, {meeting.longitude:.6f}"
         new_text = (
@@ -219,12 +245,11 @@ async def handle_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
         except Exception as e:
             logger.warning(f"Не удалось отредактировать сообщение: {e}")
-            # Если невозможно — просто удаляем
+            # Если невозможно — удаляем и отправляем новое
             try:
                 await query.message.delete()
             except Exception:
                 pass
-            # И отправляем новое
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=new_text,
@@ -241,7 +266,5 @@ async def handle_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             pass  # Игнорируем, если сообщение уже удалено
 
-
-# --- Регистрация обработчиков ---
 join_handler = CallbackQueryHandler(handle_join, pattern=f"^{JOIN_PREFIX}")
 leave_handler = CallbackQueryHandler(handle_leave, pattern=f"^{LEAVE_PREFIX}")
