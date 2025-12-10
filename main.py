@@ -9,6 +9,7 @@ import asyncio
 import platform
 from typing import Dict, Any
 from telegram import Update
+from all import handle_view_participants, back_to_owner_menu
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -207,6 +208,8 @@ async def main():
         application.add_handler(CallbackQueryHandler(h["send_chat_instruction_video"], pattern="^send_chat_video$"))
         application.add_handler(h["join_handler"])
         application.add_handler(h["leave_handler"])
+        application.add_handler(CallbackQueryHandler(handle_view_participants, pattern=r"^view_participants_\d+$"))
+        application.add_handler(CallbackQueryHandler(back_to_owner_menu, pattern=r"^back_to_owner_\d+$"))
 
         # === Логирование (только в dev) ===
         from config import WEBHOOK_URL

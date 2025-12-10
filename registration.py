@@ -16,13 +16,12 @@ from db import User, get_db
 from logic import is_user_registered
 from common import send_main_menu
 from sqlalchemy import select
-import re
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Состояния регистрации
-ASK_NAME, ASK_GENDER, ASK_AGE, ASK_CITY, ASK_PHOTO = range(5)
+# --- Состояния регистрации (обновлено) ---
+ASK_NAME, ASK_GENDER, ASK_AGE = range(3)  # Теперь только 3 шага
 
 
 async def start_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -84,7 +83,10 @@ async def handle_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    gender = query.data.split("_", 1)[1]
+    gender_data = query.data.split("_", 1)[1]
+    gender_map = {"male": "Мужской", "female": "Женский", "other": "Другой"}
+    gender = gender_map.get(gender_data, "Другой")
+
     context.user_data['gender'] = gender
     logger.info("[REG] ✅ Пол сохранён: %s", gender)
 
@@ -110,76 +112,32 @@ async def ask_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['age'] = age
     logger.info("[REG] ✅ Возраст сохранён: %d", age)
 
-    await update.effective_message.reply_text("🏙️ Введите ваш город:")
-    return ASK_CITY
-
-
-async def ask_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Шаг 4: Город.
-    """
-    user_id = update.effective_user.id
-    city = update.message.text.strip().lower()
-
-    city = re.sub(r'\b(г|город|область|край|республика|район)\b', '', city, flags=re.IGNORECASE).strip()
-
-    if not city or len(city) < 2 or len(city) > 100:
-        await update.effective_message.reply_text("❌ Введите корректное название города (2–100 символов):")
-        return ASK_CITY
-
-    context.user_data['city'] = city
-    logger.info("[REG] ✅ Город сохранён: %s", city)
-
-    await update.effective_message.reply_text(
-        "📸 Отправьте фотографию для аватарки.\n\n"
-        "❗️ Поддерживается только фото (не файл)."
-    )
-    return ASK_PHOTO
-
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Шаг 5: Получение фото и сохранение в БД.
-    """
-    user_id = update.effective_user.id
-    logger.info("[REG] 🖼️ Получено фото от пользователя %s", user_id)
-
-    required = ['name', 'gender', 'age', 'city']
-    if not all(context.user_data.get(k) for k in required):
-        logger.warning("[REG] ❌ Недостаточно данных: %s", context.user_data)
-        await update.effective_message.reply_text("❌ Ошибка. Начните регистрацию заново.")
-        return ConversationHandler.END
+    # === Сохранение в БД ===
+    username = update.effective_user.username
 
     try:
-        photo_file_id = update.message.photo[-1].file_id
-        username = update.effective_user.username
-
         async with get_db() as db:
-            # ✅ Исправлено: select() из sqlalchemy
-            result = await db.execute(
-                select(User).where(User.telegram_id == user_id)
-            )
+            # Проверяем, есть ли пользователь
+            result = await db.execute(select(User).where(User.telegram_id == user_id))
             user = result.scalar_one_or_none()
 
             if user is None:
+                # Создаём нового
                 user = User(
                     telegram_id=user_id,
                     username=username,
                     full_name=context.user_data['name'],
                     gender=context.user_data['gender'],
                     age=context.user_data['age'],
-                    photo_id=photo_file_id,
                 )
                 db.add(user)
                 logger.info("[REG] ✅ Новый пользователь добавлен: %s", user_id)
             else:
+                # Обновляем существующего
                 user.full_name = context.user_data['name']
                 user.gender = context.user_data['gender']
                 user.age = context.user_data['age']
                 user.username = username
-                user.photo_id = photo_file_id
-                logger.info("[REG] ✅ Профиль обновлён: %s", user_id)
-
             await db.commit()
             await db.refresh(user)
 
@@ -216,19 +174,10 @@ registration_conv = ConversationHandler(
         ASK_AGE: [
             MessageHandler(filters.TEXT & ~filters.COMMAND, ask_age)
         ],
-        ASK_CITY: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, ask_city)
-        ],
-        ASK_PHOTO: [
-            MessageHandler(filters.PHOTO, handle_photo)
-        ],
     },
     fallbacks=[
         CommandHandler("cancel", lambda u, c: ConversationHandler.END),
-        MessageHandler(
-            filters.COMMAND,
-            lambda u, c: ConversationHandler.END
-        ),
+        MessageHandler(filters.COMMAND, lambda u, c: ConversationHandler.END),
     ],
     per_user=True,
     allow_reentry=True,

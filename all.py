@@ -10,6 +10,7 @@ from telegram import (
     Update,
     InputMediaPhoto,
 )
+from telegram.constants import ParseMode
 from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
@@ -69,6 +70,35 @@ async def handle_main_menu_buttons(update: Update, context: ContextTypes.DEFAULT
     elif text == "👥 Мои встречи" and registered:
         await show_my_meetings(update, context)
         return
+
+    elif text == "💡 Инфо":
+        info_text = (
+            "📘 <b>О боте</b>\n\n"
+            "Этот бот помогает находить и создавать встречи по интересам — "
+            "от кофе до настольных игр.\n\n"
+            "📌 <b>Что можно делать:</b>\n"
+            "• Создавать встречи — кнопка «➕ СОЗДАТЬ ВСТРЕЧУ»\n"
+            "• Искать встречи по интересам — «🔍 НАЙТИ ВСТРЕЧУ»\n"
+            "• Посмотреть свои встречи — «👥 Мои встречи»:\n"
+            "   — созданные вами\n"
+            "   — редактировать или удалить\n"
+            "   — те, к которым вы присоединились\n\n"
+            "Бот в ранней стадии разработки.\n\n"
+            "🛠 <b>Если что-то зависло:</b>\n"
+            "🔁 <b>Начните процесс заново:</b>\n"
+            "1. Нажмите «➕ СОЗДАТЬ ВСТРЕЧУ»</b>\n"
+            " или «🔍 НАЙТИ ВСТРЕЧУ»\n"
+            "2. Или введите /start\n\n"
+            "✨ Спасибо за понимание!"
+        )
+        await update.message.reply_text(
+            info_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+        return
+
+       
 # --- 3. Мои встречи ---
 async def show_my_meetings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать выбор: свои встречи или участие"""
@@ -91,13 +121,97 @@ async def get_meeting_owner_markup(meeting: Meeting) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🤖 ИИ", callback_data=f"edit_ai_{meeting.id}"),
-            InlineKeyboardButton("✍️ Вручную", callback_data=f"edit_manual_{meeting.id}")
+            InlineKeyboardButton("✍️ Ручное", callback_data=f"edit_manual_{meeting.id}")
         ],
-        [InlineKeyboardButton("🔍 Детали", callback_data=f"details_{meeting.id}")],
-        [InlineKeyboardButton("🗑️ Удалить", callback_data=f"delete_{meeting.id}")]
+        [
+            InlineKeyboardButton("🔍 Детали", callback_data=f"details_{meeting.id}")
+        ],
+        [
+            InlineKeyboardButton("👥 Участники", callback_data=f"view_participants_{meeting.id}")
+        ],
+        [
+            InlineKeyboardButton("🗑️ Удалить", callback_data=f"delete_{meeting.id}")
+        ]
+    ])
+async def handle_view_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Показать список участников встречи (только для создателя).
+    """
+    query = update.callback_query
+    try:
+        meeting_id = int(query.data.split("_")[2])  # view_participants_<id>
+    except (IndexError, ValueError):
+        await query.answer("❌ Неверный ID встречи.")
+        return
+
+    user_id = query.from_user.id
+    await query.answer()
+
+    async with get_db() as db:
+        # Получаем встречу
+        meeting = await db.get(Meeting, meeting_id)
+        if not meeting:
+            await query.edit_message_text("❌ Встреча не найдена.")
+            return
+
+        if meeting.creator_id != user_id:
+            await query.answer("❌ Только создатель может просматривать участников.", show_alert=True)
+            return
+
+        # Получаем участников с именами и юзернеймами
+        result = await db.execute(
+            select(User.full_name, User.username)
+            .join(MeetingParticipant, User.telegram_id == MeetingParticipant.user_id)
+            .where(MeetingParticipant.meeting_id == meeting_id)
+        )
+        participants = result.all()
+
+    if not participants:
+        text = "🤷‍♂️ Пока никто не присоединился."
+    else:
+        text = "👥 <b>Участники встречи:</b>\n\n"
+        for i, (full_name, username) in enumerate(participants, 1):
+            if username:
+                text += f"{i}. {full_name} (@{username})\n"
+            else:
+                text += f"{i}. {full_name} (без юзернейма)\n"
+
+    text += f"\n✅ Всего: {len(participants)}"
+
+    # Кнопка "Назад"
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"back_to_owner_{meeting_id}")]
     ])
 
-# --- 4. Встречи, где пользователь — создатель ---
+    await query.edit_message_text(text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
+
+async def back_to_owner_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Возврат к меню создателя встречи.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        meeting_id = int(query.data.split("_")[-1])  # back_to_owner_<id>
+    except (IndexError, ValueError):
+        await query.edit_message_text("❌ Ошибка: неизвестная встреча.")
+        return
+
+    async with get_db() as db:
+        meeting = await db.get(Meeting, meeting_id)
+        if not meeting:
+            await query.edit_message_text("❌ Встреча не найдена.")
+            return
+
+    markup = await get_meeting_owner_markup(meeting)
+    await query.edit_message_text(
+        text=f"Управление встречей:\n\n📌 <b>{meeting.title}</b>",
+        reply_markup=markup,
+        parse_mode=ParseMode.HTML
+    )
+
+
 async def handle_my_own_meetings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка нажатия 'Созданные'"""
     query = update.callback_query
@@ -309,7 +423,6 @@ async def cancel_delete_meeting(update: Update, context: ContextTypes.DEFAULT_TY
         message_id=query.message.message_id
     )
 
-
 # --- 7. Детали встречи ---
 async def handle_meeting_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показ подробной информации о встрече с учётом участия"""
@@ -453,9 +566,6 @@ async def back_to_meeting(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
 
-
-
-# --- 8. Прочие функции ---
 async def set_chat_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Установка ссылки на чат (команда)"""
     if not context.args or len(context.args) != 2:
@@ -524,18 +634,6 @@ async def handle_leave_meeting(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer(f"Вы покинули встречу.")
 
 
-# --- 9. Вспомогательные функции ---
-async def get_meeting_owner_markup(meeting: Meeting) -> InlineKeyboardMarkup:
-    """Кнопки для создателя встречи"""
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🤖 ИИ-редактор", callback_data=f"edit_ai_{meeting.id}"),
-            InlineKeyboardButton("🗑️ Удалить", callback_data=f"delete_{meeting.id}")
-        ],
-        [InlineKeyboardButton("🔍 Детали", callback_data=f"details_{meeting.id}")]
-    ])
-
-
 def get_handlers():
     """Возвращает все обработчики"""
     return {
@@ -555,5 +653,6 @@ def get_handlers():
         'leave': CallbackQueryHandler(handle_leave_meeting, pattern=f'^{LEAVE_PREFIX}\\d+$'),
         'set_chat': CommandHandler('setchat', set_chat_link),
         'join': CallbackQueryHandler(handle_join, pattern=f'^{JOIN_PREFIX}\\d+$'),
-
+        'view_participants': CallbackQueryHandler(handle_view_participants, pattern=r'^view_participants_\d+$'),
+        'back_to_owner': CallbackQueryHandler(back_to_owner_menu, pattern=r'^back_to_owner_\d+$'),
     }

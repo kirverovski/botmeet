@@ -45,12 +45,13 @@ logger = logging.getLogger(__name__)
     AGE_RANGE_CHOICE,
     MIN_AGE_INPUT,
     MAX_AGE_INPUT,
+    GENDER_REQUIREMENT_CHOICE,
     WANT_CHAT,
     WAITING_PHOTOS,
-) = range(13)
+) = range(14)
 
 
-def get_progress_text(step: int, total: int = 9) -> str:
+def get_progress_text(step: int, total: int = 10) -> str:
     return f"📌 <b>Шаг {step}/{total}</b>\n"
 
 
@@ -357,10 +358,11 @@ async def handle_privacy_choice(update: Update, context: ContextTypes.DEFAULT_TY
     ])
 
     msg = await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"{get_progress_text(5)}📍 Отправьте ссылку на место встречи (Яндекс.Карты):",
-        reply_markup=markup,
-        parse_mode=ParseMode.HTML,
+       chat_id=update.effective_chat.id,
+       text=f"{get_progress_text(5)}📍 Отправьте ссылку на место встречи (Яндекс.Карты):\n"
+            "Или введите адрес вручную, например: <code>Москва, Тверская, 26</code>",
+       reply_markup=markup,
+       parse_mode=ParseMode.HTML,
     )
     context.user_data['message_id'] = msg.message_id
     return MEETING_LOCATION
@@ -547,7 +549,6 @@ async def handle_map_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'city': city_display,
     })
 
-    # Переход к выбору даты
     now = datetime.now()
     context.user_data['calendar_year'] = now.year
     context.user_data['calendar_month'] = now.month
@@ -560,8 +561,7 @@ async def handle_map_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data['message_id'] = msg.message_id
     return MEETING_DATE
-# --- Дата (Новый календарь) ---
-# --- Дата (Новый календарь) ---
+
 async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Шаг 6: Выбор даты → после выбора — отправляем выбор времени.
@@ -768,7 +768,8 @@ async def handle_max_participants(update: Update, context: ContextTypes.DEFAULT_
 
 async def handle_age_range_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Шаг 9: Выбор возрастных ограничений.
+    Шаг: выбор возрастных ограничений.
+    После завершения — всегда переходим к выбору гендера.
     """
     query = update.callback_query
     await query.answer()
@@ -785,19 +786,8 @@ async def handle_age_range_choice(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.debug(f"[MEETING] Не удалось удалить сообщение: {e}")
 
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Да, добавить", callback_data="chat_yes")],
-            [InlineKeyboardButton("❌ Нет, не нужно", callback_data="chat_no")]
-        ])
-
-        msg = await context.bot.send_message(
-            chat_id=query.message.chat.id,
-            text=f"{get_progress_text(9)}💬 Добавить чат для участников?",
-            reply_markup=markup,
-            parse_mode=ParseMode.HTML,
-        )
-        context.user_data['message_id'] = msg.message_id
-        return WANT_CHAT
+        # ✅ Всегда — к выбору гендера
+        return await ask_gender_requirement(update, context)
 
     elif query.data == "set_age_range":
         try:
@@ -849,7 +839,7 @@ async def handle_min_age_input(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_max_age_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Ввод максимального возраста.
-    После ввода — переход к выбору чата.
+    После ввода — НЕ на чат, а на выбор гендера.
     """
     try:
         max_age = int(update.message.text)
@@ -874,25 +864,158 @@ async def handle_max_age_input(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.debug(f"[MEETING] Не удалось удалить сообщение: {e}")
 
-        # Показываем кнопки: нужен ли чат?
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Да, добавить", callback_data="chat_yes")],
-            [InlineKeyboardButton("❌ Нет, не нужно", callback_data="chat_no")]
-        ])
-
-        msg = await update.effective_message.reply_text(
-            f"{get_progress_text(9)}💬 Добавить чат для участников?",
-            reply_markup=markup,
-            parse_mode=ParseMode.HTML,
-        )
-        context.user_data['message_id'] = msg.message_id
-        return WANT_CHAT  # ✅ Переход к следующему шагу
+        # ✅ Переход к выбору гендера
+        return await ask_gender_requirement(update, context)
 
     except ValueError:
         await update.effective_message.reply_text("❌ Введите число.")
         return MAX_AGE_INPUT
 
-# --- Создание встречи ---
+
+async def ask_gender_requirement(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Отправляет клавиатуру для множественного выбора пола.
+    Расположение:
+    Мужской | Женский
+    Другой | Любой
+    ✅ Подтвердить выбор
+    """
+    selected = context.user_data.get('selected_genders', set())
+
+    buttons = [
+        [
+            InlineKeyboardButton(f"{'✅' if 'Мужской' in selected else '⬜'} Мужской", callback_data="gender_male"),
+            InlineKeyboardButton(f"{'✅' if 'Женский' in selected else '⬜'} Женский", callback_data="gender_female"),
+        ],
+        [
+            InlineKeyboardButton(f"{'✅' if 'Другой' in selected else '⬜'} Другой", callback_data="gender_other"),
+            InlineKeyboardButton(f"{'✅' if 'Любой' in selected else '⬜'} Любой", callback_data="gender_any"),
+        ],
+        [
+            InlineKeyboardButton("✅ Подтвердить выбор", callback_data="confirm_gender"),
+        ],
+    ]
+    markup = InlineKeyboardMarkup(buttons)
+
+    msg = await update.effective_message.reply_text(
+        f"{get_progress_text(9)}👥 Кто может участвовать в встрече?",
+        reply_markup=markup,
+        parse_mode=ParseMode.HTML,
+    )
+    context.user_data['message_id'] = msg.message_id
+    return GENDER_REQUIREMENT_CHOICE
+
+
+async def handle_gender_requirement_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработка множественного выбора гендера.
+    - Можно выбрать несколько, кроме "Любой"
+    - При выборе "Любой" — сбрасываем всё, кроме него
+    - При подтверждении — сохраняем и переходим к чату
+    """
+    query = update.callback_query
+    await query.answer()
+
+    selected = context.user_data.get('selected_genders', set())
+
+    # --- Кнопка: "Подтвердить выбор" ---
+    if query.data == "confirm_gender":
+        if not selected:
+            await query.answer("❗ Выберите хотя бы один вариант.", show_alert=True)
+            return GENDER_REQUIREMENT_CHOICE
+
+        # Если выбран "Любой" — значит, все подходят
+        if "Любой" in selected:
+            context.user_data['required_gender'] = None
+        else:
+            # Сохраняем список выбранных
+            context.user_data['required_gender'] = list(selected)
+
+        try:
+            await context.bot.delete_message(
+                chat_id=query.message.chat.id,
+                message_id=context.user_data['message_id']
+            )
+        except Exception as e:
+            logger.debug(f"[MEETING] Не удалось удалить сообщение: {e}")
+
+        # Переход к чату
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Да, добавить", callback_data="chat_yes")],
+            [InlineKeyboardButton("❌ Нет, не нужно", callback_data="chat_no")]
+        ])
+        msg = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"{get_progress_text(10)}💬 Добавить чат для участников?",
+            reply_markup=markup,
+            parse_mode=ParseMode.HTML,
+        )
+        context.user_data['message_id'] = msg.message_id
+        return WANT_CHAT
+
+    # --- Обработка выбора ---
+    gender_map = {
+        "gender_male": "Мужской",
+        "gender_female": "Женский",
+        "gender_other": "Другой",
+        "gender_any": "Любой",
+    }
+
+    if query.data not in gender_map:
+        return GENDER_REQUIREMENT_CHOICE
+
+    selected_gender = gender_map[query.data]
+
+    # --- Нажатие "Любой" ---
+    if selected_gender == "Любой":
+        if "Любой" in selected:
+            selected.discard("Любой")
+        else:
+            # При выборе "Любой" — сбрасываем всё
+            selected.clear()
+            selected.add("Любой")
+
+    # --- Нажатие других ---
+    else:
+        if "Любой" in selected:
+            # Если уже выбран "Любой", нельзя выбрать другие
+            await query.answer("❌ Сначала снимите «Любой»", show_alert=True)
+            return GENDER_REQUIREMENT_CHOICE
+
+        if selected_gender in selected:
+            selected.discard(selected_gender)
+        else:
+            selected.add(selected_gender)
+
+    # Сохраняем
+    context.user_data['selected_genders'] = selected
+
+    # Обновляем клавиатуру
+    buttons = [
+        [
+            InlineKeyboardButton(f"{'✅' if 'Мужской' in selected else '⬜'} Мужской", callback_data="gender_male"),
+            InlineKeyboardButton(f"{'✅' if 'Женский' in selected else '⬜'} Женский", callback_data="gender_female"),
+        ],
+        [
+            InlineKeyboardButton(f"{'✅' if 'Другой' in selected else '⬜'} Другой", callback_data="gender_other"),
+            InlineKeyboardButton(f"{'✅' if 'Любой' in selected else '⬜'} Любой", callback_data="gender_any"),
+        ],
+        [
+            InlineKeyboardButton("✅ Подтвердить выбор", callback_data="confirm_gender"),
+        ],
+    ]
+    markup = InlineKeyboardMarkup(buttons)
+
+    # Редактируем только при изменении
+    try:
+        if query.message.reply_markup.to_dict() != markup.to_dict():
+            await query.edit_message_reply_markup(reply_markup=markup)
+    except Exception as e:
+        if "Message is not modified" not in str(e):
+            logger.warning(f"Ошибка при редактировании клавиатуры: {e}")
+
+    return GENDER_REQUIREMENT_CHOICE
+
 async def create_meeting_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Финализация: сохранение встречи в БД.
@@ -908,6 +1031,19 @@ async def create_meeting_now(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     try:
         async with get_db() as db:
+            # ✅ Обработка required_gender: преобразуем в строку
+            raw_gender = context.user_data.get('required_gender')
+            if raw_gender is None:
+                required_gender = "Любой"
+            elif isinstance(raw_gender, list):
+                # Соединяем список через запятую: ['Мужской', 'Женский'] → "Мужской, Женский"
+                required_gender = ", ".join(raw_gender)
+            elif isinstance(raw_gender, str):
+                required_gender = raw_gender
+            else:
+                required_gender = "Любой"  # fallback
+
+            # Создаём объект встречи
             meeting = Meeting(
                 title=context.user_data['title'],
                 description=context.user_data['description'],
@@ -925,16 +1061,17 @@ async def create_meeting_now(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 current_participants=1,
                 creator_id=user_id,
                 is_approved=False,
+                required_gender=required_gender,  # ✅ сохраняем как строку
             )
             db.add(meeting)
             await db.commit()
             await db.refresh(meeting)
 
-            # Сами себе участник
+            # Добавляем создателя как участника
             db.add(MeetingParticipant(user_id=user_id, meeting_id=meeting.id))
             await db.commit()
 
-        # Финальное сообщение
+        # Отправляем подтверждение
         age_text = ""
         if meeting.min_age is not None and meeting.max_age is not None:
             age_text = f"\n👶 Возраст: {meeting.min_age}–{meeting.max_age} лет"
@@ -950,6 +1087,8 @@ async def create_meeting_now(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"👥 {meeting.current_participants}/{meeting.max_participants}"
             f"{age_text}"
         )
+        if meeting.required_gender:
+            text += f"\n🚻 Пол: {meeting.required_gender}"
 
         await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -959,6 +1098,7 @@ async def create_meeting_now(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     finally:
         context.user_data.clear()
+
 
 
 # --- Чат для встречи ---
@@ -1016,8 +1156,10 @@ async def show_chat_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "5. Скопируйте и отправьте сюда"
     )
 
+    # Добавляем кнопку "Назад"
     markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎬 Посмотреть видео", callback_data="send_chat_video")]
+        [InlineKeyboardButton("🎬 Посмотреть видео", callback_data="send_chat_video")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="back_to_want_chat")]
     ])
 
     try:
@@ -1027,11 +1169,8 @@ async def show_chat_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=markup
         )
     except Exception as e:
-        # Игнорируем "не изменено", логируем остальное
         if "message is not modified" not in str(e):
             logger.warning(f"Ошибка при редактировании: {e}")
-
-
 
 async def send_chat_instruction_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1048,7 +1187,7 @@ async def send_chat_instruction_video(update: Update, context: ContextTypes.DEFA
 
     context.application.bot_data[key] = True
 
-    # Убираем кнопки
+    # Убираем старую клавиатуру
     try:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception as e:
@@ -1063,22 +1202,64 @@ async def send_chat_instruction_video(update: Update, context: ContextTypes.DEFA
                 chat_id=chat_id,
                 video=video,
                 caption="Скопируй ссылку на чат и отправь ее мне",
-                supports_streaming=True
+                supports_streaming=True,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("◀️ Назад", callback_data="back_to_want_chat")]
+                ])
             )
     except FileNotFoundError:
-        await context.bot.send_message(chat_id, "❌ Файл видео не найден на сервере. Обратитесь к администратору.")
+        await context.bot.send_message(
+            chat_id,
+            "❌ Файл видео не найден на сервере. Обратитесь к администратору.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ Назад", callback_data="back_to_want_chat")]
+            ])
+        )
     except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ Ошибка при отправке видео: {e}")
+        await context.bot.send_message(
+            chat_id,
+            f"❌ Ошибка при отправке видео: {e}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ Назад", callback_data="back_to_want_chat")]
+            ])
+        )
 
-    # Удаляем ключ через 60 секунд — без job_queue
+    # Удаляем ключ через 60 секунд
     try:
         loop = asyncio.get_event_loop()
         loop.call_later(60, lambda: context.application.bot_data.pop(key, None))
     except Exception as e:
         logger.debug(f"Не удалось запланировать удаление ключа: {e}")
-  # Игнорируем, если не получилось
 
+async def back_to_want_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Возвращает пользователя к вопросу: нужен ли чат?
+    """
+    query = update.callback_query
+    await query.answer()
 
+    try:
+        # Удаляем текущее сообщение (инструкцию или видео)
+        await context.bot.delete_message(
+            chat_id=query.message.chat_id,
+            message_id=query.message.message_id
+        )
+    except Exception as e:
+        logger.debug(f"[CHAT] Не удалось удалить сообщение: {e}")
+
+    # Отправляем снова вопрос о чате
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Да, добавить", callback_data="chat_yes")],
+        [InlineKeyboardButton("❌ Нет, не нужно", callback_data="chat_no")]
+    ])
+    msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"{get_progress_text(10)}💬 Добавить чат для участников?",
+        reply_markup=markup,
+        parse_mode=ParseMode.HTML,
+    )
+    context.user_data['message_id'] = msg.message_id
+    return WANT_CHAT
 
 async def handle_chat_link_anytime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -1138,10 +1319,13 @@ meeting_conv = ConversationHandler(
         AGE_RANGE_CHOICE: [CallbackQueryHandler(handle_age_range_choice, pattern=r"^(set_age_range|no_age_limit)$")],
         MIN_AGE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_min_age_input)],
         MAX_AGE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_max_age_input)],
+        GENDER_REQUIREMENT_CHOICE: [CallbackQueryHandler(handle_gender_requirement_choice,
+        pattern=r"^(gender_(male|female|other|any)|confirm_gender)$")],
         WANT_CHAT: [
             CallbackQueryHandler(handle_want_chat, pattern=r"^chat_(yes|no)$"),
             CallbackQueryHandler(show_chat_help, pattern="^show_chat_help$"),
             CallbackQueryHandler(send_chat_instruction_video, pattern="^send_chat_video$"),
+            CallbackQueryHandler(back_to_want_chat, pattern="^back_to_want_chat$"), 
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_link_anytime),],
         },
     fallbacks=[CommandHandler("cancel", lambda u, c: c.user_data.clear() or ConversationHandler.END)],

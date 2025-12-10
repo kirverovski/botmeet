@@ -67,13 +67,39 @@ async def handle_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await query.answer(f"❌ Максимальный возраст: {meeting.max_age} лет.")
                 return
 
+            # Добавляем участника
             participation = MeetingParticipant(meeting_id=meeting_id, user_id=user_id)
             db.add(participation)
             meeting.current_participants += 1
             await db.commit()
             await db.refresh(meeting)
 
-        # Формируем текст
+        # ✅ Уведомление создателю — после закрытия сессии
+        try:
+            async with get_db() as db_notify:
+                result = await db_notify.execute(
+                    select(User.full_name, User.username).where(User.telegram_id == user_id)
+                )
+                user_data = result.first()
+                if not user_data:
+                    raise ValueError("Не удалось получить данные пользователя")
+
+                user_name = user_data.full_name
+                username = f"@{user_data.username}" if user_data.username else "Пользователь"
+
+            await context.bot.send_message(
+                chat_id=meeting.creator_id,
+                text=f"👤 <b>{user_name}</b> ({username}) присоединился(-лась) к вашей встрече:\n\n"
+                     f"📌 <b>{meeting.title}</b>\n"
+                     f"📅 {meeting.date_time.strftime('%d.%m %H:%M')}\n"
+                     f"📍 {meeting.address}\n\n"
+                     f"👥 Теперь участников: {meeting.current_participants}/{meeting.max_participants}",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось отправить уведомление создателю {meeting.creator_id}: {e}")
+
+        # Формируем текст для обновления сообщения
         location_text = meeting.address or f"{meeting.latitude:.6f}, {meeting.longitude:.6f}"
         new_text = (
             f"📌 <b>{meeting.title}</b>\n"
@@ -89,7 +115,7 @@ async def handle_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             [InlineKeyboardButton("🔍 Подробнее", callback_data=f"details_{meeting_id}")]
         ])
 
-        # Попытка редактирования
+        # Попытка редактирования сообщения
         try:
             await query.edit_message_text(
                 text=new_text,
@@ -108,8 +134,8 @@ async def handle_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             # И удаляем старое, если возможно
             try:
                 await query.message.delete()
-            except:
-                pass
+            except Exception as del_e:
+                logger.warning(f"Не удалось удалить старое сообщение: {del_e}")
 
         await query.answer(f"✅ Вы присоединились к «{meeting.title}»!")
 
@@ -117,9 +143,8 @@ async def handle_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.exception("[JOIN] Ошибка при присоединении: %s", e)
         try:
             await query.answer("❌ Ошибка регистрации. Попробуйте позже.")
-        except:
-            pass
-  # Игнорируем, если сообщение уже удалено
+        except Exception:
+            pass  # Игнорируем, если сообщение уже удалено
 
 
 async def handle_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -172,8 +197,6 @@ async def handle_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         # Обновление сообщения
         location_text = meeting.address or f"{meeting.latitude:.6f}, {meeting.longitude:.6f}"
-        available = meeting.max_participants - meeting.current_participants
-
         new_text = (
             f"📌 <b>{meeting.title}</b>\n"
             f"📅 {meeting.date_time.strftime('%d.%m %H:%M')}\n"
@@ -188,18 +211,34 @@ async def handle_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             [InlineKeyboardButton("🔍 Подробнее", callback_data=f"details_{meeting_id}")]
         ])
 
-        await query.message.edit_text(
-            text=new_text,
-            reply_markup=markup,
-            parse_mode="HTML"
-        )
+        try:
+            await query.message.edit_text(
+                text=new_text,
+                reply_markup=markup,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отредактировать сообщение: {e}")
+            # Если невозможно — просто удаляем
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            # И отправляем новое
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=new_text,
+                reply_markup=markup,
+                parse_mode="HTML"
+            )
+
         await query.answer(f"✅ Вы покинули «{meeting.title}».")
 
     except Exception as e:
         logger.exception("[LEAVE] Ошибка при выходе пользователя %s из встречи %s: %s", user_id, meeting_id, e)
         try:
             await query.answer("❌ Ошибка. Попробуйте позже.")
-        except:
+        except Exception:
             pass  # Игнорируем, если сообщение уже удалено
 
 

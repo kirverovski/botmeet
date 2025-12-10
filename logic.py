@@ -103,7 +103,8 @@ async def get_all_upcoming_meetings(user_id: Optional[int] = None) -> List[Dict[
 
 async def is_user_registered(user_id: int) -> bool:
     """
-    Проверяет, зарегистрирован ли пользователь по его telegram_id
+    Проверяет, зарегистрирован ли пользователь по его telegram_id.
+    Теперь достаточно просто наличия записи в таблице users.
     """
     async with get_db() as db:
         result = await db.execute(
@@ -126,9 +127,6 @@ async def is_user_in_meeting(user_id: int, meeting_id: int) -> bool:
 
 
 def get_main_keyboard(registered: bool) -> ReplyKeyboardMarkup:
-    """
-    Возвращает главное меню.
-    """
     keyboard = [
         [
             KeyboardButton("➕ СОЗДАТЬ ВСТРЕЧУ"),
@@ -139,7 +137,12 @@ def get_main_keyboard(registered: bool) -> ReplyKeyboardMarkup:
         keyboard.append([KeyboardButton("👥 Мои встречи")])
     else:
         keyboard.append([KeyboardButton("👤 ЗАРЕГИСТРИРОВАТЬСЯ")])
+    
+    # Добавляем кнопку "Инфо" в отдельной строке
+    keyboard.append([KeyboardButton("💡 Инфо")])
+    
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
 
 
 def extract_coordinates_from_yandex(url: str) -> Optional[Tuple[float, float]]:
@@ -206,7 +209,6 @@ def extract_coordinates_from_yandex(url: str) -> Optional[Tuple[float, float]]:
     except Exception as e:
         logger.exception(f"❌ Ошибка при парсинге ссылки: {e}")
         return None
-
 
 
 async def get_coords_from_yandex(address: str) -> Optional[Tuple[float, float]]:

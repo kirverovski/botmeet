@@ -1,11 +1,10 @@
-"""
-searchmeetings.py — модуль поиска встреч: по категориям, локации, ИИ
-"""
 from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     Update,
     InputMediaPhoto,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -29,11 +28,40 @@ from common import send_main_menu
 
 logger = logging.getLogger(__name__)
 
+def can_user_see_meeting(user_gender: str, meeting_required_gender: Optional[str]) -> bool:
+    logger.info(f"[GENDER_FILTER] 🚻 Пользователь: '{user_gender}' (type={type(user_gender)}), Встреча: '{meeting_required_gender}' (type={type(meeting_required_gender)})")
+
+    if not meeting_required_gender or not str(meeting_required_gender).strip():
+        logger.info("[GENDER_FILTER] → required_gender пустой → ✅ разрешено")
+        return True
+
+    required_str = str(meeting_required_gender).strip()
+
+    if "Любой" in required_str:
+        logger.info("[GENDER_FILTER] → 'Любой' найден → ✅ разрешено")
+        return True
+
+    allowed_genders = {g.strip() for g in required_str.split(",") if g.strip()}
+    logger.info(f"[GENDER_FILTER] → Допустимые полы: {allowed_genders}")
+
+    if user_gender in allowed_genders:
+        logger.info(f"[GENDER_FILTER] ✅ '{user_gender}' разрешён")
+        return True
+    else:
+        logger.info(f"[GENDER_FILTER] ❌ '{user_gender}' не входит в {allowed_genders}")
+        return False
+
+def can_user_join_by_age(user_age: int, min_age: Optional[int], max_age: Optional[int]) -> bool:
+    """
+    Проверяет, может ли пользователь участвовать в встрече по возрасту.
+    """
+    if min_age is not None and user_age < min_age:
+        return False
+    if max_age is not None and user_age > max_age:
+        return False
+    return True
 
 async def handle_find_meetings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Показать выбор категорий перед поиском.
-    """
     user_id = update.effective_user.id
     if not await is_user_registered(user_id):
         await update.message.reply_text("⚠️ Пройдите регистрацию, чтобы искать встречи.")
@@ -171,7 +199,7 @@ async def request_ai_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_ai_query_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Обработка ввода пользователя для ИИ-поиска.
+    Обработка ввода пользователя для ИИ-поиска с фильтрацией по полу и возрасту.
     """
     if not context.user_data.get("awaiting_ai_query"):
         return
@@ -186,9 +214,9 @@ async def handle_ai_query_input(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["awaiting_ai_query"] = False
     await update.message.reply_text("🔍 Ищу подходящие встречи с помощью ИИ...")
 
-    # ✅ Безопасное определение категорий
+    # Категории
     if context.user_data.get("skip_categories"):
-        categories = None  # Искать по всем
+        categories = None
     else:
         selected = context.user_data.get("selected_categories", [])
         categories = list(selected) if selected else None
@@ -209,14 +237,49 @@ async def handle_ai_query_input(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text("😔 Встречи не найдены.")
             return
 
-        # Участия пользователя
+        # Логируем наличие встреч до фильтрации
+        logger.info(f"[AI_SEARCH] Найдено встреч до фильтрации: {len(meetings)}")
+
+        # Получаем пол и возраст пользователя
+        result = await db.execute(
+            select(User.gender, User.age).where(User.telegram_id == user_id)
+        )
+        user_gender, user_age = result.first()
+
+        if not user_gender:
+            await update.message.reply_text("❌ Для поиска необходимо указать ваш пол.")
+            return
+        if not user_age:
+            await update.message.reply_text("❌ Для поиска необходимо указать ваш возраст.")
+            return
+
+        logger.info(f"[AI_SEARCH] Пользователь {user_id} — пол: {user_gender}, возраст: {user_age}")
+
+        # Фильтрация по полу
+        meetings_before = len(meetings)
+        meetings = [m for m in meetings if can_user_see_meeting(user_gender, m.required_gender)]
+        logger.info(f"[AI_SEARCH] После фильтрации по полу: {meetings_before} → {len(meetings)}")
+
+        if not meetings:
+            await update.message.reply_text("😔 Нет подходящих встреч по вашему полу.")
+            return
+
+        # ✅ Фильтрация по возрасту
+        meetings_before_age = len(meetings)
+        meetings = [m for m in meetings if can_user_join_by_age(user_age, m.min_age, m.max_age)]
+        logger.info(f"[AI_SEARCH] После фильтрации по возрасту: {meetings_before_age} → {len(meetings)}")
+
+        if not meetings:
+            await update.message.reply_text("😔 Нет подходящих встреч по вашему возрасту.")
+            return
+
+        # Получаем ID встреч, в которых пользователь участвует
         result = await db.execute(
             select(MeetingParticipant.meeting_id).where(MeetingParticipant.user_id == user_id)
         )
         user_participations = set(result.scalars().all())
 
         # Отображение каждой встречи
-        
         for meeting in meetings:
             free = meeting.max_participants - meeting.current_participants
             status_text = (
@@ -254,16 +317,13 @@ async def handle_ai_query_input(update: Update, context: ContextTypes.DEFAULT_TY
 
             markup = InlineKeyboardMarkup(buttons)
 
-            # Отправка фото (если есть)
+            # Обработка фото
             if meeting.photos_data:
                 try:
                     photos = json.loads(meeting.photos_data)
                     if photos:
                         media_group = [InputMediaPhoto(media=p['file_id']) for p in photos]
-                        await context.bot.send_media_group(
-                            chat_id=update.effective_chat.id,
-                            media=media_group
-                        )
+                        await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media_group)
                         await update.effective_message.reply_text(
                             text=text,
                             reply_markup=markup,
@@ -279,74 +339,92 @@ async def handle_ai_query_input(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode=ParseMode.HTML
             )
 
+        # Финальное сообщение
         await update.message.reply_text("Вот что нашёл ИИ 🤖")
 
     except Exception as e:
-        logger.exception("[AI_SEARCH] Ошибка при поиске: %s", e)
+        logger.exception("[AI_SEARCH] Неожиданная ошибка при поиске встреч: %s", e)
         await update.message.reply_text("❌ Произошла ошибка при поиске. Попробуйте позже.")
 
 
+
 async def request_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Инструкция по отправке геопозиции.
-    """
+
     query = update.callback_query
+
     if query:
         await query.answer()
-        await query.edit_message_text(
-            "📍 Отправьте ваше местоположение, чтобы найти встречи поблизости."
-        )
 
-    msg_text = (
-        "📍 <b>Как отправить геопозицию:</b>\n\n"
-        "1. Нажмите на 📎 (скрепку)\n"
-        "2. Выберите «Геопозиция»\n"
-        "3. Отправьте ваше местоположение\n\n"
-        "⚠️ Важно: отправьте именно <i>локацию</i>, а не адрес."
+        # Удаляем inline-кнопки, НЕ заменяя текст
+        await query.edit_message_reply_markup(reply_markup=None)
+
+    # Создаём клавиатуру с кнопкой "Отправить геопозицию"
+    reply_markup = ReplyKeyboardMarkup(
+        [[KeyboardButton("📍 Отправить геопозицию", request_location=True)]],
+        one_time_keyboard=True,
+        resize_keyboard=True,
+        selective=True
     )
 
+    # Отправляем ОДНО сообщение с текстом и клавиатурой
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text=msg_text,
-        parse_mode=ParseMode.HTML,
+        text="🌍 Поделитесь своим местоположением, чтобы найти встречи поблизости:",
+        reply_markup=reply_markup,
         disable_notification=True
     )
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обработка полученной геопозиции.
-    """
-    # Защита от текстовых сообщений
     if not update.message.location:
         return
+
+    # Убираем клавиатуру
+    from telegram import ReplyKeyboardRemove
+    await update.message.reply_text(
+        "🔍 Определяем ваш город...",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
     lat = update.message.location.latitude
     lon = update.message.location.longitude
 
-    # Подтверждение
-    await update.message.reply_text("🔍 Определяем ваш город...")
-
-    # Определение города
     city = await get_city_from_coords(lat, lon)
     if not city or city == "Неизвестный город":
         await update.message.reply_text("❌ Не удалось определить город. Попробуйте ещё раз.")
-        await send_main_menu(update, context)
+
+        # ✅ Получаем user_id
+        user_id = update.effective_user.id
+        registered = await is_user_registered(user_id)
+
+        await update.effective_message.reply_text(
+            "Что дальше?",
+            reply_markup=get_main_keyboard(registered=registered)
+        )
         return
 
-    # Сохранение в контекст
     context.user_data.update({
         "step": "near_me",
         "city": city,
         "lat": lat,
         "lon": lon,
-        "page": 0
     })
 
     # Показ встреч
     await show_near_me_meetings(update, context, lat, lon, page=0)
 
-    # Отправка главного меню (невидимо)
-    await send_main_menu(update.effective_chat.id, context, silent=True)
+    # ✅ Получаем user_id
+    user_id = update.effective_user.id
+    registered = await is_user_registered(user_id)
+
+    # ✅ Отправляем меню как ответ
+    await update.effective_message.reply_text(
+        "🔚 Что хотите сделать дальше?",
+        reply_markup=get_main_keyboard(registered=registered)
+    )
+
+
+
+
 
 async def get_city_from_coords(lat: float, lon: float) -> str:
     """
@@ -407,7 +485,7 @@ def calculate_distance(lat1: float, lon1: float, lat2, lon2) -> float:
 
 
 async def get_meetings_by_geo(
-    lat: float, lon: float, page: int = 0, per_page: int = 5, categories: Optional[List[str]] = None
+    lat: float, lon: float, page: int = 0, per_page: int = 3, categories: Optional[List[str]] = None
 ) -> List[Meeting]:
     """
     Получение встреч поблизости с фильтрацией по категориям и сортировкой по расстоянию.
@@ -427,13 +505,9 @@ async def get_meetings_by_geo(
     return sorted_meetings[start_idx:start_idx + per_page]
 
 async def show_near_me_meetings(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, lat: float, lon: float, page: int = 0
-):
-    """
-    Отображение встреч поблизости — с фото, текстом и кнопками.
-    Расстояние < 1 км показывается в метрах, остальное — в км.
-    """
-    # ✅ Безопасное определение категорий
+    update: Update, context: ContextTypes.DEFAULT_TYPE, lat: float, lon: float, page: int = 0):
+    
+    # ✅ Категории
     if context.user_data.get("skip_categories"):
         categories = None
     else:
@@ -442,24 +516,55 @@ async def show_near_me_meetings(
 
     user_id = update.effective_user.id
 
-    meetings = await get_meetings_by_geo(lat, lon, page, per_page=5, categories=categories)
+    # Получаем **на 1 больше**, чем нужно, чтобы проверить, есть ли следующая страница
+    meetings = await get_meetings_by_geo(lat, lon, page, per_page=4, categories=categories)
 
     if not meetings:
         await update.effective_message.reply_text("😔 Встреч поблизости не найдено.")
         return
 
-    # Участия пользователя
-    user_participations = set()
-    if await is_user_registered(user_id):
-        async with get_db() as db:
-            result = await db.execute(
-                select(MeetingParticipant.meeting_id).where(MeetingParticipant.user_id == user_id)
-            )
-            user_participations = set(result.scalars().all())
+    # ✅ Получаем пол и возраст пользователя
+    async with get_db() as db:
+        result = await db.execute(
+            select(User.gender, User.age).where(User.telegram_id == user_id)
+        )
+        user_gender, user_age = result.first()
 
-    # Отображение каждой встречи
-    
-    for meeting in meetings:
+        if not user_gender:
+            await update.message.reply_text("❌ Не удалось определить ваш пол.")
+            return
+        if not user_age:
+            await update.message.reply_text("❌ Не удалось определить ваш возраст.")
+            return
+
+    logger.info(f"[NEAR_ME] Пользователь {user_id} — пол: {user_gender}, возраст: {user_age}")
+
+    # ✅ Фильтруем по полу
+    meetings = [m for m in meetings if can_user_see_meeting(user_gender, m.required_gender)]
+
+    if not meetings:
+        await update.effective_message.reply_text("😔 Нет подходящих встреч по вашему полу.")
+        return
+
+    # ✅ Фильтруем по возрасту
+    meetings = [m for m in meetings if can_user_join_by_age(user_age, m.min_age, m.max_age)]
+
+    if not meetings:
+        await update.effective_message.reply_text("😔 Нет подходящих встреч по вашему возрасту.")
+        return
+
+    # ✅ Получаем ID встреч, в которых пользователь участвует
+    result = await db.execute(
+        select(MeetingParticipant.meeting_id).where(MeetingParticipant.user_id == user_id)
+    )
+    user_participations = set(result.scalars().all())
+
+    # Ограничиваем до 3
+    current_meetings = meetings[:3]
+    has_next_page = len(meetings) > 3  # Если вернули 4, значит, есть ещё
+
+    # Отображение
+    for meeting in current_meetings:
         free = meeting.max_participants - meeting.current_participants
         status_text = (
             f"🟢 Свободно {free} {['место', 'места', 'мест'][min(free, 3) - 1]} из {meeting.max_participants}"
@@ -517,14 +622,12 @@ async def show_near_me_meetings(
 
         await update.effective_message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
 
-    # Кнопка "Показать ещё"
-    if len(meetings) == 5:
+    # Кнопка "Показать ещё" — только если есть ещё
+    if has_next_page:
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➡️ Показать ещё", callback_data=f"show_more_near_{page + 1}")]
+            [InlineKeyboardButton("➡️ Показать ещё 3 встречи", callback_data=f"show_more_near_{page + 1}")]
         ])
-        await update.effective_message.reply_text("Хотите увидеть больше?", reply_markup=markup)
-
-
+        await update.effective_message.reply_text("Хотите увидеть ещё?", reply_markup=markup)
 
 
 async def handle_show_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
