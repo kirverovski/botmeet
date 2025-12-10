@@ -8,6 +8,7 @@ import sys
 import asyncio
 import platform
 from typing import Dict, Any
+from stats import stats_handler
 from telegram import Update
 from all import handle_view_participants, back_to_owner_menu
 from telegram.ext import (
@@ -210,6 +211,7 @@ async def main():
         application.add_handler(h["leave_handler"])
         application.add_handler(CallbackQueryHandler(handle_view_participants, pattern=r"^view_participants_\d+$"))
         application.add_handler(CallbackQueryHandler(back_to_owner_menu, pattern=r"^back_to_owner_\d+$"))
+        application.add_handler(stats_handler)
 
         # === Логирование (только в dev) ===
         from config import WEBHOOK_URL

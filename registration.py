@@ -16,6 +16,7 @@ from db import User, get_db
 from logic import is_user_registered
 from common import send_main_menu
 from sqlalchemy import select
+from stats import increment_stat  
 import logging
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,9 @@ async def ask_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user.username = username
             await db.commit()
             await db.refresh(user)
+
+            # 📈 Увеличиваем счётчик новых пользователей
+            await increment_stat("new_users")
 
         await update.effective_message.reply_text("🎉 Регистрация завершена! Добро пожаловать!")
         await send_main_menu(user_id, context)
