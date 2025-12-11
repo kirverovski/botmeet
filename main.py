@@ -8,7 +8,7 @@ import sys
 import asyncio
 import platform
 from typing import Dict, Any
-from stats import stats_handler
+from stats import stats_handler, schedule_daily_report
 from telegram import Update
 from all import handle_view_participants, back_to_owner_menu
 from telegram.ext import (
@@ -135,6 +135,7 @@ async def main():
 
         # Хранение медиагрупп
         application.bot_data.setdefault("media_groups", {})
+        await schedule_daily_report(application)
 
         # Регистрация обработчиков
         h = get_handlers()
