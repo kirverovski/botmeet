@@ -9,7 +9,8 @@ import asyncio
 import platform
 from typing import Dict, Any
 from telegram import Update
-from all import handle_view_participants, back_to_owner_menu
+from all import (handle_view_participants, back_to_owner_menu, 
+    handle_view_participants, back_to_owner_menu)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -57,6 +58,7 @@ def get_handlers():
         handle_leave_meeting,
         back_to_meeting,
         set_chat_link,
+        handle_dev_message_input,
     )
     from searchmeetings import (
         get_handlers as get_search_handlers,
@@ -96,8 +98,10 @@ def get_handlers():
         "handle_find_meetings": handle_find_meetings,
         "handle_near_me": handle_near_me,
         "request_ai_search": request_ai_search,
+        "handle_dev_message_input": handle_dev_message_input,
+        
     }
-
+    handlers["start"] = CommandHandler("start", send_welcome)
     handlers.update(get_search_handlers())
     handlers.update(get_ai_edit_handlers())
     return handlers
@@ -137,7 +141,7 @@ async def main():
 
         # Регистрация обработчиков
         h = get_handlers()
-
+        
         # === Группа 1: Conversation Handlers ===
         application.add_handler(h["registration_conv"], group=1)
         application.add_handler(h["meeting_conv"], group=1)
@@ -171,18 +175,25 @@ async def main():
             MessageHandler(filters.TEXT & ~filters.COMMAND, ai_search_flow),
             group=4
         )
-
-        # === Группа 5: Основное меню ===
+        # группа 6
+        application.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                h["handle_dev_message_input"]
+            ),
+            group=5
+        )
+        # === Группа 6: Основное меню ===
         application.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,
                 h["handle_main_menu_buttons"]
             ),
-            group=5
+            group=6
         )
 
         # === Команды ===
-        application.add_handler(CommandHandler("start", h["send_welcome"]))
+        application.add_handler(h["start"]) 
         application.add_handler(CommandHandler("setchat", h["set_chat_link"]))
 
         async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -210,6 +221,8 @@ async def main():
         application.add_handler(h["leave_handler"])
         application.add_handler(CallbackQueryHandler(handle_view_participants, pattern=r"^view_participants_\d+$"))
         application.add_handler(CallbackQueryHandler(back_to_owner_menu, pattern=r"^back_to_owner_\d+$"))
+       
+
 
         # === Логирование (только в dev) ===
         from config import WEBHOOK_URL

@@ -9,21 +9,24 @@ from telegram import (
     InlineKeyboardButton,
     Update,
     InputMediaPhoto,
+    ReplyKeyboardMarkup,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode 
+import html
 from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
     ApplicationBuilder,
-    filters
+    filters,
+    ConversationHandler
 )
 from constant import *
 from common import (
     user_states, send_main_menu
 )
-from config import YANDEX_API_KEY
+from config import YANDEX_API_KEY, ADMIN_USER_ID
 from participants import handle_join
 from logic import (
         is_user_registered, get_main_keyboard,
@@ -36,20 +39,27 @@ import calendar
 
 # Логгер
 logger = logging.getLogger(__name__)
+AWAITING_DEV_MESSAGE = "awaiting_dev_message"
 
 # --- 1. /start ---
 async def send_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Приветствие и главное меню."""
     user_id = update.effective_user.id
     logger.info(f"[WELCOME] Пользователь {user_id} запустил бота")
-    await send_main_menu(chat_id=update.effective_chat.id, context=context)
+    context.user_data.clear()
+
+    await send_main_menu(chat_id=update.effective_chat.id, context=context, force=True)
 
 # --- 2. Обработчик нажатий на кнопки главного меню ---
 async def handle_main_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка текстовых кнопок меню."""
     text = update.message.text.strip()
     user_id = update.effective_user.id
-
+    
+    if text == "/start":
+        return
+    if text.startswith('/'):
+        return
     # Защита от вмешательства в диалоги
     if context.user_data.get('creating_meeting') or context.user_data.get('handling_registration'):
         logger.debug(f"[MENU] Пользователь {user_id} в процессе действия — игнорируем")
@@ -72,34 +82,164 @@ async def handle_main_menu_buttons(update: Update, context: ContextTypes.DEFAULT
         return
 
     elif text == "💡 Инфо":
+        info_keyboard = [
+            ["📩 Написать разработчикам"],
+            ["☕ Угостить кофе создателя бота"],
+            ["◀️ Назад"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(info_keyboard, resize_keyboard=True, one_time_keyboard=False)
+
         info_text = (
-    "📘 <b>О боте</b>\n\n"
-    "Этот бот помогает находить и создавать встречи по интересам — "
-    "от кофе до настольных игр.\n\n"
-    "📌 <b>Что можно делать:</b>\n"
-    "• Создавать встречи — кнопка «➕ СОЗДАТЬ ВСТРЕЧУ»\n"
-    "• Искать встречи по интересам — «🔍 НАЙТИ ВСТРЕЧУ»\n"
-    "• Посмотреть свои встречи — «👥 Мои встречи»:\n"
-    "   — созданные вами\n"
-    "   — редактировать или удалить\n"
-    "   — те, к которым вы присоединились\n\n"
-    "Бот в ранней стадии разработки.\n\n"
-    "🛠 <b>Если что-то зависло:</b>\n"
-    "🔁 Начните процесс заново:\n"
-    "1. Нажмите «➕ СОЗДАТЬ ВСТРЕЧУ»\n"
-    "   или «🔍 НАЙТИ ВСТРЕЧУ»\n"
-    "2. Или введите /start\n\n"
-    "✨ Спасибо за понимание!"
-)
+            "📘 <b>Инструкция по использованию бота</b>\n\n"
+            "<b>1️⃣ Чтобы создать встречу</b>\n"
+            "➡️ Нажмите «➕ СОЗДАТЬ ВСТРЕЧУ»\n"
+            "➡️ Пройдите 10 шагов: название, фото, дата, адрес и др.\n"
+            "⚠️ Если нажать другую кнопку главного меню — процесс прервётся\n\n"
+            "<b>2️⃣ Чтобы просмотреть созданные вами встречи или те, к которым вы присоединились</b>\n"
+            "➡️ Нажмите «👥 Мои встречи»\n\n"
+            "🔸 <b>Созданные</b> — встречи, которые вы запустили. Здесь можно просмотреть и изменить детали встречи\n"
+            "• Редактируйте через:\n"
+            "   — <b>🤖 ИИ</b> — автоматически\n"
+            "   — <b>✍️ Ручное</b> — сами\n"
+            "• Просмотрите детали встречи\n"
+            "• Просмотрите присоединившихся участников:\n"
+            "• Удалите при необходимости\n\n"
+            "🔸 <b>Участвую</b> — встречи, к которым вы присоединились\n"
+            "• Просмотрите детали\n"
+            "• Покиньте встречу\n"
+            "• Перейдите в общий чат (если есть)\n\n"
+            "<b>3️⃣ Поиск встреч</b>\n"
+            "➡️ Нажмите «🔍 НАЙТИ ВСТРЕЧУ»\n"
+            "➡️ Выберите категории и нажмите ✅Готово, если желаете отфильтровать ненужное\n"
+            "➡️ Или нажмите «Пропустить» — увидите все встречи по всем категориям\n\n"
+            "🛠 <b>Если что-то зависло:</b>\n"
+            "🔁 Начните процесс заново:\n"
+            "• Нажмите «➕ СОЗДАТЬ ВСТРЕЧУ» или «🔍 НАЙТИ ВСТРЕЧУ»\n"
+            "• Или введите /start"
+        )
 
         await update.message.reply_text(
             info_text,
             parse_mode="HTML",
-            disable_web_page_preview=True
+            disable_web_page_preview=True,
+            reply_markup=reply_markup
         )
         return
 
-       
+    # --- Подменю "Инфо" ---
+    elif text == "📩 Написать разработчикам":
+        markup = ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True)
+        await update.message.reply_text(
+            "📩 Напишите ваше сообщение разработчику в этом чате.",
+            reply_markup=markup
+        )
+        context.user_data["awaiting_dev_message"] = True
+        return
+
+
+    elif text == "☕ Угостить кофе создателя бота":
+        coffee_link = "https://www.donationalerts.com/r/botmeetty"
+        text_msg = (
+            f"Большое спасибо за желание поддержать! 🙏\n\n"
+            f"Вы можете угостить меня чашечкой кофе или даже пиццей, чтобы помочь с развитием бота ☕🍕\n\n"
+            f"Ваши пожертвования идут на:\n"
+            f"• 🛠 Поддержку серверов\n"
+            f"• 🚀 Разработку новых функций\n"
+            f"• 🧠 Оплату YandexGPT и других API\n\n"
+            f"👉 <a href='{coffee_link}'>Поддержать проект</a>"
+        )
+        # Показываем ВЕСЬ набор кнопок "Инфо"
+        info_keyboard = [
+            ["📩 Написать разработчикам"],
+            ["☕ Угостить кофе создателя бота"],
+            ["◀️ Назад"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(info_keyboard, resize_keyboard=True)
+        await update.message.reply_text(
+            text_msg,
+            parse_mode="HTML",
+            disable_web_page_preview=False,
+            reply_markup=reply_markup
+        )
+        return
+
+
+    elif text == "◀️ Назад":
+        # Удаляем последнее сообщение (с "Инфо" или "Угостить кофе")
+        try:
+            await update.message.delete()
+        except Exception as e:
+            logger.debug(f"Не удалось удалить сообщение: {e}")  # Иногда нельзя (старое сообщение)
+        
+        # Отправляем главное меню
+        await send_main_menu(chat_id=update.effective_chat.id, context=context, force=True)
+
+        return
+
+# --- Обработчик текстовых сообщений при ожидании сообщения разработчику ---
+async def handle_dev_message_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_dev_message"):
+        return
+
+    message_text = update.message.text.strip()
+
+    # 🔥 Проверка на отмену
+    if message_text == "❌ Отмена":
+        info_keyboard = [
+            ["📩 Написать разработчикам"],
+            ["☕ Угостить кофе создателя бота"],
+            ["◀️ Назад"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(info_keyboard, resize_keyboard=True)
+        await update.message.reply_text(
+            "Вы отменили отправку сообщения.",
+            reply_markup=reply_markup
+        )
+        context.user_data.pop("awaiting_dev_message", None)
+        return
+
+    # Остальное — как было
+    if message_text.startswith("/"):
+        return
+
+    user = update.effective_user
+    user_id = user.id
+    full_name = user.full_name
+    username = f"@{user.username}" if user.username else "нет юзернейма"
+    DEVELOPER_CHAT_ID = ADMIN_USER_ID
+
+    try:
+        await context.bot.send_message(
+            chat_id=DEVELOPER_CHAT_ID,
+            text=f"📬 <b>Сообщение от пользователя</b>\n"
+                 f"👤 <b>Имя:</b> {html.escape(full_name)}\n"
+                 f"🔗 <b>Юзернейм:</b> {html.escape(username)}\n"
+                 f"🆔 <b>ID:</b> <code>{user_id}</code>\n\n"
+                 f"💬 <b>Сообщение:</b>\n{html.escape(message_text)}",
+            parse_mode="HTML"
+        )
+        # Подтверждение пользователю
+        info_keyboard = [
+            ["📩 Написать разработчикам"],
+            ["☕ Угостить кофе создателя бота"],
+            ["◀️ Назад"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(info_keyboard, resize_keyboard=True)
+        await update.message.reply_text(
+            "✅ Ваше сообщение отправлено! Спасибо за обратную связь.",
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки сообщения разработчику: {e}")
+        reply_markup = ReplyKeyboardMarkup([["◀️ Назад"]], resize_keyboard=True)
+        await update.message.reply_text(
+            "❌ Не удалось отправить сообщение. Попробуйте позже.",
+            reply_markup=reply_markup
+        )
+
+    context.user_data.pop("awaiting_dev_message", None)
+
+
 # --- 3. Мои встречи ---
 async def show_my_meetings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать выбор: свои встречи или участие"""
@@ -639,10 +779,7 @@ def get_handlers():
     """Возвращает все обработчики"""
     return {
         'start': CommandHandler('start', send_welcome),
-        'main_menu': MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_main_menu_buttons
-        ),
+        
         'my_meetings': CallbackQueryHandler(show_my_meetings, pattern='^my_own$|^participate$'),
         'handle_own': CallbackQueryHandler(handle_my_own_meetings, pattern='^my_own$'),
         'handle_participate': CallbackQueryHandler(handle_participate, pattern='^participate$'),
@@ -656,4 +793,5 @@ def get_handlers():
         'join': CallbackQueryHandler(handle_join, pattern=f'^{JOIN_PREFIX}\\d+$'),
         'view_participants': CallbackQueryHandler(handle_view_participants, pattern=r'^view_participants_\d+$'),
         'back_to_owner': CallbackQueryHandler(back_to_owner_menu, pattern=r'^back_to_owner_\d+$'),
+        'handle_dev_message_input': MessageHandler(filters.TEXT & ~filters.COMMAND, handle_dev_message_input),
     }

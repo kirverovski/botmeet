@@ -77,5 +77,7 @@ MAX_PARTICIPANTS = 10000
 
 # === Длительность встречи (часов) ===
 MEETING_DURATION_HOURS = 10000
+INFO_PREFIX = "info_"
+
 
 

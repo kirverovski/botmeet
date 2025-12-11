@@ -54,3 +54,4 @@ else:
 # === Дополнительные настройки ===
 WEBAPP_MAP_URL = os.getenv("WEBAPP_MAP_URL", "https://yandex.ru/maps")
 YANDEX_GPT_ENABLED = True  # Можно отключить для тестов
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", 0))  # ID администратора бота
