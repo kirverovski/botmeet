@@ -15,6 +15,7 @@ from telegram.ext import (
     filters,
 )
 from datetime import datetime, timedelta
+from stats import increment_stat 
 from calendar_keyboard import create_calendar, handle_calendar_query
 import re
 import json
@@ -1071,6 +1072,9 @@ async def create_meeting_now(update: Update, context: ContextTypes.DEFAULT_TYPE)
             db.add(MeetingParticipant(user_id=user_id, meeting_id=meeting.id))
             await db.commit()
 
+            # 📈 Увеличиваем счётчик новых встреч
+            await increment_stat("new_meetings")
+
         # Отправляем подтверждение
         age_text = ""
         if meeting.min_age is not None and meeting.max_age is not None:
@@ -1098,6 +1102,7 @@ async def create_meeting_now(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     finally:
         context.user_data.clear()
+
 
 
 

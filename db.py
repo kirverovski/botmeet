@@ -30,11 +30,12 @@ logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
+
 # === Асинхронный engine с пулом соединений ===
 try:
     engine = create_async_engine(
         DATABASE_URL,
-        echo=False, 
+        echo=False,
         pool_size=20,
         max_overflow=40,
         pool_pre_ping=True,
@@ -77,6 +78,20 @@ async def init_db():
             )
             logger.info("🔧 Колонка required_gender добавлена (если была отсутствует)")
 
+            # Создаём таблицу статистики (на случай, если не создалась через metadata)
+            await conn.execute(
+                text("""
+                CREATE TABLE IF NOT EXISTS daily_stats (
+                    id BIGSERIAL PRIMARY KEY,
+                    date TIMESTAMP DEFAULT NOW(),
+                    new_users INTEGER DEFAULT 0,
+                    new_meetings INTEGER DEFAULT 0,
+                    UNIQUE(date)
+                );
+                """)
+            )
+            logger.info("📊 Таблица daily_stats создана или уже существует")
+
     except Exception as e:
         logger.exception("❌ Ошибка при инициализации БД: %s", e)
         raise
@@ -96,6 +111,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     finally:
         await session.close()
 
+
 # === МОДЕЛИ ===
 class User(Base):
     __tablename__ = "users"
@@ -110,6 +126,7 @@ class User(Base):
     created_at = Column(DateTime, default=func.now())
 
     participations = relationship("MeetingParticipant", back_populates="user", cascade="all, delete-orphan")
+
 
 class Meeting(Base):
     __tablename__ = "meetings"
@@ -131,7 +148,7 @@ class Meeting(Base):
     creator_id = Column(BigInteger, nullable=False)
     is_approved = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())
-    required_gender = Column(String(50), nullable=True)  
+    required_gender = Column(String(50), nullable=True)
 
     creator = relationship(
         "User",
@@ -155,3 +172,16 @@ class MeetingParticipant(Base):
 
     meeting = relationship("Meeting", back_populates="participants")
     user = relationship("User", back_populates="participations")
+
+
+# === СТАТИСТИКА ===
+class DailyStat(Base):
+    __tablename__ = "daily_stats"
+    id = Column(BigInteger, primary_key=True, index=True)
+    date = Column(DateTime, default=func.now(), index=True)
+    new_users = Column(Integer, default=0)
+    new_meetings = Column(Integer, default=0)
+
+    __table_args__ = (
+        UniqueConstraint('date', name='_daily_stat_uc'),
+    )

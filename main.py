@@ -8,6 +8,7 @@ import sys
 import asyncio
 import platform
 from typing import Dict, Any
+from stats import stats_handler, schedule_daily_report
 from telegram import Update
 from all import (handle_view_participants, back_to_owner_menu, 
     handle_view_participants, back_to_owner_menu)
@@ -221,8 +222,7 @@ async def main():
         application.add_handler(h["leave_handler"])
         application.add_handler(CallbackQueryHandler(handle_view_participants, pattern=r"^view_participants_\d+$"))
         application.add_handler(CallbackQueryHandler(back_to_owner_menu, pattern=r"^back_to_owner_\d+$"))
-       
-
+        application.add_handler(stats_handler)
 
         # === Логирование (только в dev) ===
         from config import WEBHOOK_URL
@@ -237,6 +237,13 @@ async def main():
             from config import WEBHOOK_URL, PORT
             await application.start()
             logger.info("✅ Бот запущен и подключён к Telegram")
+
+            # === 🔔 Настраиваем ежедневный отчёт ПОСЛЕ старта ===
+            try:
+                await schedule_daily_report(application)
+                logger.info("✅ Ежедневный отчёт на 20:00 успешно запланирован")
+            except Exception as e:
+                logger.error("❌ Не удалось запланировать ежедневный отчёт: %s", e)
 
             if WEBHOOK_URL:
                 port = int(PORT) if PORT else 8080
