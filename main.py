@@ -135,7 +135,6 @@ async def main():
 
         # Хранение медиагрупп
         application.bot_data.setdefault("media_groups", {})
-        await schedule_daily_report(application)
 
         # Регистрация обработчиков
         h = get_handlers()
@@ -227,6 +226,13 @@ async def main():
             from config import WEBHOOK_URL, PORT
             await application.start()
             logger.info("✅ Бот запущен и подключён к Telegram")
+
+            # === 🔔 Настраиваем ежедневный отчёт ПОСЛЕ старта ===
+            try:
+                await schedule_daily_report(application)
+                logger.info("✅ Ежедневный отчёт на 20:00 успешно запланирован")
+            except Exception as e:
+                logger.error("❌ Не удалось запланировать ежедневный отчёт: %s", e)
 
             if WEBHOOK_URL:
                 port = int(PORT) if PORT else 8080
